@@ -1,0 +1,568 @@
+-- Undetek Combined: Hitbox Expander + Highlight ESP (reapply) + FOV/Scope + Speed Boost (settable)
+-- Drop into executor. CoreGui parented.
+
+-- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+
+-- State defaults
+local toggled = false
+local visible = false
+local ignoreTeam = false
+local scopeEnabled = false
+local fovEnabled = false
+local invisibleFov = false           -- NEW: invisible FOV visual toggle
+local fovRadius = 150 -- pixels default
+local espEnabled = false
+local espVisibleCheck = false
+local speedEnabled = false
+local SPEED_VALUE = 20
+
+-- Storage
+local highlights = {}          -- player -> Highlight instance
+local originalPartProps = {}   -- player -> { partName -> {Size, Transparency, Material, CanCollide} }
+
+-- GUI (parented to CoreGui)
+local ScreenGui = Instance.new("ScreenGui", game.CoreGui)
+ScreenGui.Name = "HitboxExpander_Undetek"
+ScreenGui.IgnoreGuiInset = true
+
+-- Main frame (compact, black)
+local MainFrame = Instance.new("Frame", ScreenGui)
+MainFrame.Position = UDim2.new(0.05, 0, 0.18, 0)
+MainFrame.Size = UDim2.new(0, 260, 0, 360)
+MainFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+
+local Title = Instance.new("TextLabel", MainFrame)
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.Position = UDim2.new(0, 0, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Undetek V0.5"
+Title.TextColor3 = Color3.fromRGB(128, 0, 128)
+Title.TextSize = 16
+Title.Font = Enum.Font.Code
+Title.BorderSizePixel = 0
+
+-- Tabs
+local TabHolder = Instance.new("Frame", MainFrame)
+TabHolder.Size = UDim2.new(1, 0, 0, 26)
+TabHolder.Position = UDim2.new(0, 0, 0, 30)
+TabHolder.BackgroundTransparency = 1
+
+local Tabs = {"ESP", "Misc"}
+local SelectedTab = "Misc"
+local TabFrames = {}
+local TabButtons = {}
+
+for i, name in ipairs(Tabs) do
+    local btn = Instance.new("TextButton", TabHolder)
+    btn.Size = UDim2.new(0.5, -1, 1, 0)
+    btn.Position = UDim2.new((i-1)*0.5, 0, 0, 0)
+    btn.BackgroundTransparency = 1
+    btn.Text = name
+    btn.TextColor3 = Color3.fromRGB(128, 0, 128)
+    btn.Font = Enum.Font.Code
+    btn.TextSize = 14
+    TabButtons[name] = btn
+
+    local frame = Instance.new("ScrollingFrame", MainFrame)
+    frame.Name = name .. "Frame"
+    frame.Size = UDim2.new(1, -8, 1, -30 - 26)
+    frame.Position = UDim2.new(0, 4, 0, 30 + 26 + 4)
+    frame.BackgroundTransparency = 1
+    frame.BorderSizePixel = 0
+    frame.Visible = (name == SelectedTab)
+    frame.ScrollBarThickness = 6
+
+    local layout = Instance.new("UIListLayout", frame)
+    layout.Padding = UDim.new(0, 6)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        frame.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 8)
+    end)
+
+    TabFrames[name] = frame
+
+    btn.MouseButton1Click:Connect(function()
+        SelectedTab = name
+        for n, f in pairs(TabFrames) do
+            f.Visible = (n == name)
+        end
+    end)
+end
+
+-- small helpers for building controls
+local function newButton(parent, text, order)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0, 220, 0, 30)
+    b.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    b.TextColor3 = Color3.fromRGB(200, 180, 255)
+    b.Font = Enum.Font.Code
+    b.TextSize = 14
+    b.Text = text
+    b.LayoutOrder = order or 1
+    b.Parent = parent
+    return b
+end
+
+local function newTextbox(parent, placeholder, order)
+    local t = Instance.new("TextBox")
+    t.Size = UDim2.new(0, 220, 0, 30)
+    t.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+    t.PlaceholderText = placeholder
+    t.TextColor3 = Color3.fromRGB(220, 220, 220)
+    t.Font = Enum.Font.Code
+    t.TextSize = 14
+    t.LayoutOrder = order or 1
+    t.Parent = parent
+    return t
+end
+
+--// Misc controls
+local MiscFrame = TabFrames["Misc"]
+local idx = 1
+
+local TargetBtn = newButton(MiscFrame, "Target Part: Head", idx); idx = idx + 1
+local currentPart = "Head"
+TargetBtn.MouseButton1Click:Connect(function()
+    currentPart = (currentPart == "Head") and "HumanoidRootPart" or "Head"
+    TargetBtn.Text = "Target Part: " .. currentPart
+end)
+
+local SizeBox = newTextbox(MiscFrame, "Hitbox size (e.g. 6)", idx); idx = idx + 1
+local ToggleBtn = newButton(MiscFrame, "Hitbox: OFF", idx); idx = idx + 1
+local VisToggle = newButton(MiscFrame, "Hitbox Visible: OFF", idx); idx = idx + 1
+local TeamToggle = newButton(MiscFrame, "Ignore Team: OFF", idx); idx = idx + 1
+local ScopeToggle = newButton(MiscFrame, "Scope Mode: OFF", idx); idx = idx + 1
+local FovToggle = newButton(MiscFrame, "FOV Based: OFF", idx); idx = idx + 1
+local InvisibleFovBtn = newButton(MiscFrame, "Invisible FOV: OFF", idx); idx = idx + 1 -- NEW button
+local FovSizeBox = newTextbox(MiscFrame, "FOV Size (pixels)", idx); idx = idx + 1
+local SpeedToggle = newButton(MiscFrame, "Speed Boost: OFF ("..tostring(SPEED_VALUE)..")", idx); idx = idx + 1
+local SpeedBox = newTextbox(MiscFrame, "Speed (1-200)", idx); idx = idx + 1
+
+FovSizeBox.Text = tostring(fovRadius)
+SizeBox.Text = "6"
+SpeedBox.Text = tostring(SPEED_VALUE)
+
+--// ESP controls
+local EspFrame = TabFrames["ESP"]
+local espIdx = 1
+local EspToggle = newButton(EspFrame, "ESP Highlight: OFF", espIdx); espIdx = espIdx + 1
+local EspVisible = newButton(EspFrame, "Visible Check: OFF", espIdx); espIdx = espIdx + 1
+
+-- minimal scope dot (centered later via viewport pixels)
+local scopeDot = Instance.new("Frame", ScreenGui)
+scopeDot.Name = "ScopeDot"
+scopeDot.Size = UDim2.new(0, 4, 0, 4)
+scopeDot.AnchorPoint = Vector2.new(0.5, 0.5)
+scopeDot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+scopeDot.BorderSizePixel = 0
+scopeDot.Visible = false
+scopeDot.ZIndex = 999
+
+-- FOV circle implemented as Frame + UICorner + UIStroke (thin outline)
+local FovCircle = Instance.new("Frame", ScreenGui)
+FovCircle.Name = "FovCircle"
+FovCircle.BackgroundTransparency = 1 -- no fill
+FovCircle.BorderSizePixel = 0
+FovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+FovCircle.ZIndex = 998
+FovCircle.Visible = false
+
+local UICornerFov = Instance.new("UICorner", FovCircle)
+UICornerFov.CornerRadius = UDim.new(1, 0) -- full circle
+
+local UIStrokeFov = Instance.new("UIStroke", FovCircle)
+UIStrokeFov.Color = Color3.fromRGB(128, 0, 128)
+UIStrokeFov.Thickness = 1
+UIStrokeFov.Transparency = 0 -- fully visible thin line
+
+-- handlers for toggles
+ToggleBtn.MouseButton1Click:Connect(function()
+    toggled = not toggled
+    ToggleBtn.Text = "Hitbox: " .. (toggled and "ON" or "OFF")
+    if not toggled then
+        -- restore tracked parts
+        for player, parts in pairs(originalPartProps) do
+            for partName, props in pairs(parts) do
+                local p = player.Character and player.Character:FindFirstChild(partName)
+                if p and p:IsA("BasePart") then
+                    pcall(function()
+                        p.Size = props.Size
+                        p.Transparency = props.Transparency
+                        p.Material = props.Material
+                        p.CanCollide = props.CanCollide
+                    end)
+                end
+            end
+        end
+        originalPartProps = {}
+    end
+end)
+
+VisToggle.MouseButton1Click:Connect(function()
+    visible = not visible
+    VisToggle.Text = "Hitbox Visible: " .. (visible and "ON" or "OFF")
+end)
+
+TeamToggle.MouseButton1Click:Connect(function()
+    ignoreTeam = not ignoreTeam
+    TeamToggle.Text = "Ignore Team: " .. (ignoreTeam and "ON" or "OFF")
+end)
+
+ScopeToggle.MouseButton1Click:Connect(function()
+    scopeEnabled = not scopeEnabled
+    ScopeToggle.Text = "Scope Mode: " .. (scopeEnabled and "ON" or "OFF")
+    scopeDot.Visible = scopeEnabled
+end)
+
+FovToggle.MouseButton1Click:Connect(function()
+    fovEnabled = not fovEnabled
+    FovToggle.Text = "FOV Based: " .. (fovEnabled and "ON" or "OFF")
+    -- keep the circle present but control visibility via stroke transparency (invisibleFov)
+    FovCircle.Visible = fovEnabled
+end)
+
+-- NEW: Invisible FOV toggle handler (hides the visual outline but keeps FOV checks active)
+InvisibleFovBtn.MouseButton1Click:Connect(function()
+    invisibleFov = not invisibleFov
+    InvisibleFovBtn.Text = "Invisible FOV: " .. (invisibleFov and "ON" or "OFF")
+    if invisibleFov then
+        UIStrokeFov.Transparency = 1   -- hide the outline
+    else
+        UIStrokeFov.Transparency = 0   -- show the outline
+    end
+end)
+
+FovSizeBox.FocusLost:Connect(function(enterPressed)
+    local v = tonumber(FovSizeBox.Text)
+    if v and v > 0 then
+        fovRadius = v
+        local diam = math.max(32, math.floor(fovRadius * 2))
+        FovCircle.Size = UDim2.new(0, diam, 0, diam)
+        UICornerFov.CornerRadius = UDim.new(1, 0)
+        UIStrokeFov.Thickness = 1
+        -- ensure visual state respects invisibleFov flag
+        UIStrokeFov.Transparency = invisibleFov and 1 or 0
+    else
+        FovSizeBox.Text = tostring(fovRadius)
+    end
+end)
+
+-- Speed textbox handler: validate and set SPEED_VALUE
+SpeedBox.FocusLost:Connect(function(enterPressed)
+    local v = tonumber(SpeedBox.Text)
+    if v then
+        v = math.floor(v)
+        v = math.clamp(v, 1, 200)
+        SPEED_VALUE = v
+        SpeedBox.Text = tostring(SPEED_VALUE)
+        SpeedToggle.Text = "Speed Boost: " .. (speedEnabled and "ON" or "OFF") .. " ("..tostring(SPEED_VALUE)..")"
+    else
+        -- restore previous valid value if parse failed
+        SpeedBox.Text = tostring(SPEED_VALUE)
+    end
+end)
+
+SpeedToggle.MouseButton1Click:Connect(function()
+    speedEnabled = not speedEnabled
+    SpeedToggle.Text = "Speed Boost: " .. (speedEnabled and "ON" or "OFF") .. " ("..tostring(SPEED_VALUE)..")"
+end)
+
+EspToggle.MouseButton1Click:Connect(function()
+    espEnabled = not espEnabled
+    EspToggle.Text = "ESP Highlight: " .. (espEnabled and "ON" or "OFF")
+    if not espEnabled then
+        for _, hl in pairs(highlights) do
+            if hl and hl.Parent then
+                pcall(function() hl:Destroy() end)
+            end
+        end
+        highlights = {}
+    else
+        -- attempt to create highlights immediately for existing players
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character then
+                task.spawn(function()
+                    task.wait(0.2)
+                    createHighlightForCharacter(p, p.Character)
+                end)
+            end
+        end
+    end
+end)
+
+EspVisible.MouseButton1Click:Connect(function()
+    espVisibleCheck = not espVisibleCheck
+    EspVisible.Text = "Visible Check: " .. (espVisibleCheck and "ON" or "OFF")
+end)
+
+-- Helper: distance from center
+local function screenDistanceFromCenter(worldPos)
+    local camera = Workspace.CurrentCamera
+    if not camera then return math.huge, false end
+    local vp, onScreen = camera:WorldToViewportPoint(worldPos)
+    local center = camera.ViewportSize * 0.5
+    local dx = vp.X - center.X
+    local dy = vp.Y - center.Y
+    return math.sqrt(dx * dx + dy * dy), onScreen
+end
+
+-- Helper: visibility check using Raycast
+local function isPartVisibleToCamera(part)
+    local camera = Workspace.CurrentCamera
+    if not camera or not part then return false end
+    local origin = camera.CFrame.Position
+    local direction = (part.Position - origin)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
+    rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+    local result = Workspace:Raycast(origin, direction, rayParams)
+    if not result then return false end
+    return result.Instance and (result.Instance:IsDescendantOf(part.Parent))
+end
+
+-- Create highlight for a character safely
+function createHighlightForCharacter(player, character)
+    if not player or not character then return end
+    if highlights[player] and highlights[player].Parent then
+        pcall(function() highlights[player]:Destroy() end)
+        highlights[player] = nil
+    end
+    local ok, _ = pcall(function()
+        local hl = Instance.new("Highlight")
+        hl.Adornee = character
+        hl.FillTransparency = 0.5
+        hl.OutlineTransparency = 0
+        hl.OutlineColor = Color3.fromRGB(0,0,0)
+        hl.Parent = ScreenGui
+        highlights[player] = hl
+    end)
+end
+
+-- Ensure highlight exists / update color
+local function ensureAndUpdateHighlight(player)
+    if not espEnabled then return end
+    if player == LocalPlayer then return end
+    if ignoreTeam and player.Team == LocalPlayer.Team then
+        if highlights[player] then
+            pcall(function() highlights[player]:Destroy() end)
+            highlights[player] = nil
+        end
+        return
+    end
+    local char = player.Character
+    if not char then
+        if highlights[player] then
+            pcall(function() highlights[player]:Destroy() end)
+            highlights[player] = nil
+        end
+        return
+    end
+    if not highlights[player] or not highlights[player].Parent then
+        createHighlightForCharacter(player, char)
+    end
+    local hl = highlights[player]
+    if hl and hl.Parent then
+        if espVisibleCheck and char:FindFirstChild("HumanoidRootPart") then
+            hl.FillColor = isPartVisibleToCamera(char.HumanoidRootPart) and Color3.fromRGB(255,255,0) or Color3.fromRGB(255,0,0)
+        else
+            hl.FillColor = Color3.fromRGB(255,255,0)
+        end
+    end
+end
+
+-- Track players joining / leaving & respawns
+local function onPlayerAdded(player)
+    player.CharacterAdded:Connect(function(char)
+        task.wait(0.4)
+        if espEnabled then
+            createHighlightForCharacter(player, char)
+        end
+        originalPartProps[player] = originalPartProps[player] or {}
+    end)
+end
+
+for _, p in ipairs(Players:GetPlayers()) do
+    onPlayerAdded(p)
+end
+Players.PlayerAdded:Connect(onPlayerAdded)
+Players.PlayerRemoving:Connect(function(player)
+    if highlights[player] then
+        pcall(function() highlights[player]:Destroy() end)
+        highlights[player] = nil
+    end
+    originalPartProps[player] = nil
+end)
+
+-- Save original part props helper
+local function saveOriginalPartProps(player, partName, part)
+    if not player or not partName or not part then return end
+    originalPartProps[player] = originalPartProps[player] or {}
+    if not originalPartProps[player][partName] then
+        local ok, res = pcall(function()
+            return {
+                Size = part.Size,
+                Transparency = part.Transparency,
+                Material = part.Material,
+                CanCollide = part.CanCollide
+            }
+        end)
+        if ok and res then
+            originalPartProps[player][partName] = res
+        end
+    end
+end
+
+-- Restore original part props helper
+local function restoreOriginalPartPropsFor(player, partName)
+    if not player or not partName then return end
+    local parts = originalPartProps[player]
+    if not parts then return end
+    local props = parts[partName]
+    if not props then return end
+    local char = player.Character
+    if not char then return end
+    local p = char:FindFirstChild(partName)
+    if p and p:IsA("BasePart") then
+        pcall(function()
+            p.Size = props.Size
+            p.Transparency = props.Transparency
+            p.Material = props.Material
+            p.CanCollide = props.CanCollide
+        end)
+    end
+    parts[partName] = nil
+end
+
+-- Apply hitbox expansion to a player's currentPart (safe)
+local function applyHitboxToPlayer(player)
+    if not toggled then return end
+    if player == LocalPlayer then return end
+    if ignoreTeam and player.Team == LocalPlayer.Team then return end
+    local char = player.Character
+    if not char then return end
+    local part = char:FindFirstChild(currentPart)
+    if not part or not part:IsA("BasePart") then return end
+
+    -- FOV check if enabled
+    if fovEnabled then
+        local dist, onScreen = screenDistanceFromCenter(part.Position)
+        if (not onScreen) or dist > fovRadius then
+            -- restore if we had previously changed it
+            restoreOriginalPartPropsFor(player, currentPart)
+            return
+        end
+    end
+
+    -- store original props if not stored
+    saveOriginalPartProps(player, currentPart, part)
+
+    local sizeNum = tonumber(SizeBox.Text) or 6
+    local s = math.clamp(sizeNum, 1, 20)  -- allow up to 20 but clamp for safety
+
+    pcall(function()
+        part.Size = Vector3.new(s, s, s)
+        part.CanCollide = false
+        if visible then
+            part.Transparency = 0.5
+            part.Material = Enum.Material.ForceField
+        else
+            part.Transparency = 1
+            part.Material = Enum.Material.Plastic
+        end
+    end)
+end
+
+-- Regular reapply loop (every 1 second) to handle respawn / new players / missed cases
+task.spawn(function()
+    while true do
+        -- ESP reapply & color update
+        if espEnabled then
+            for _, player in pairs(Players:GetPlayers()) do
+                ensureAndUpdateHighlight(player)
+            end
+        else
+            -- destroy any leftover highlights if disabled
+            for _, hl in pairs(highlights) do
+                if hl and hl.Parent then
+                    pcall(function() hl:Destroy() end)
+                end
+            end
+            highlights = {}
+        end
+
+        -- Reapply hitboxes for all players (best-effort), so respawned chars get hitboxes
+        if toggled then
+            for _, player in pairs(Players:GetPlayers()) do
+                applyHitboxToPlayer(player)
+            end
+        end
+
+        task.wait(1)
+    end
+end)
+
+-- RenderStepped loop: visuals centering + continuous hitbox updates for responsiveness
+RunService.RenderStepped:Connect(function()
+    local camera = Workspace.CurrentCamera
+    if camera then
+        local center = camera.ViewportSize * 0.5
+        -- center scope dot and circle in pixel coordinates (works reliably on mobile)
+        if scopeEnabled then
+            scopeDot.Position = UDim2.new(0, center.X, 0, center.Y)
+            scopeDot.AnchorPoint = Vector2.new(0.5, 0.5)
+        end
+        if fovEnabled then
+            FovCircle.Position = UDim2.new(0, center.X, 0, center.Y)
+            FovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+        end
+    end
+
+    -- Continuous hitbox application (keeps parts sized while alive)
+    if toggled then
+        for _, player in pairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild(currentPart) then
+                if ignoreTeam and player.Team == LocalPlayer.Team then
+                    -- skip teammates
+                else
+                    applyHitboxToPlayer(player)
+                end
+            end
+        end
+    end
+
+    -- If ESP enabled, update highlight colors every frame for snappiness (even though 1s loop does it too)
+    if espEnabled then
+        for player, hl in pairs(highlights) do
+            if hl and hl.Parent and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                if espVisibleCheck then
+                    hl.FillColor = isPartVisibleToCamera(player.Character.HumanoidRootPart) and Color3.fromRGB(255,255,0) or Color3.fromRGB(255,0,0)
+                else
+                    hl.FillColor = Color3.fromRGB(255,255,0)
+                end
+            end
+        end
+    end
+end)
+
+-- Speed boost: joystick-aware using Humanoid.MoveDirection, applied on Heartbeat for physics timing
+RunService.Heartbeat:Connect(function()
+    if not speedEnabled then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not root then return end
+    local moveDir = hum.MoveDirection
+    if moveDir.Magnitude > 0.01 then
+        -- preserve vertical velocity
+        local vy = root.Velocity.Y
+        root.Velocity = Vector3.new(moveDir.X * SPEED_VALUE, vy, moveDir.Z * SPEED_VALUE)
+    end
+end)
